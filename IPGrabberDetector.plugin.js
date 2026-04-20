@@ -4,7 +4,7 @@
  * @version 3.0.0
  * @author y4ron1
  * @authorLink https://github.com/0neBeerLeft/
- * @source https://github.com/YourName/IPGrabberDetector
+ * @source https://github.com/0neBeerLeft/IPGrabberDetector
  */
 
 const REMOTE_DB_URL = "https://raw.githubusercontent.com/0neBeerLeft/IPGrabberDetector/refs/heads/main/domains.json";
