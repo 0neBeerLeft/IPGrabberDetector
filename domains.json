@@ -1,4 +1,3 @@
-```json
 [
   { "domain": "grabify.link", "level": "danger", "reason": "Grabify IP logger" },
   { "domain": "grabify.org", "level": "danger", "reason": "Grabify IP logger" },
@@ -117,4 +116,3 @@
   { "domain": "owly.home.kg", "level": "danger", "reason": "Suspicious shortener domain" },
   { "domain": "tinyurl.info.gf", "level": "danger", "reason": "Suspicious shortener domain" }
 ]
-```
