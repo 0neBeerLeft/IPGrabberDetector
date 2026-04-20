@@ -4,7 +4,7 @@
  * @version 3.0.0
  * @author y4ron1
  * @authorLink https://github.com/0neBeerLeft/
- * @source https://github.com/0neBeerLeft/IPGrabberDetector
+ * @source https://github.com/YourName/IPGrabberDetector
  */
 
 const REMOTE_DB_URL = "https://raw.githubusercontent.com/0neBeerLeft/IPGrabberDetector/refs/heads/main/domains.json";
@@ -116,17 +116,6 @@ function worstLevel(threats) {
     return threats.reduce((w, t) => THREAT_PRIORITY[t.level] > THREAT_PRIORITY[w] ? t.level : w, "info");
 }
 
-function makeShortLabel(threats) {
-    if (!Array.isArray(threats) || threats.length === 0) return "";
-    const worst = worstLevel(threats);
-    const top = threats.find(t => t.level === worst) ?? threats[0];
-    const prefix = worst === "danger" ? "⚠" : worst === "warning" ? "⚠" : "ℹ";
-    const reason = (top?.reason ?? "Flagged link").trim();
-    const max = 26;
-    const short = reason.length > max ? reason.slice(0, max - 1) + "…" : reason;
-    return `${prefix} ${short}`;
-}
-
 function makeTooltip(threats) {
     if (!Array.isArray(threats) || threats.length === 0) return "";
     const lines = threats.map(t => {
@@ -137,66 +126,14 @@ function makeTooltip(threats) {
     return lines.join("\n\n");
 }
 
-function makeSnowflake(now = Date.now()) {
-    const discordEpoch = 1420070400000n;
-    const ts = BigInt(now);
-    const timePart = (ts - discordEpoch) << 22n;
-    return (timePart).toString();
-}
-
-function buildWarningEmbed(threats, edited = false) {
-    const worst = worstLevel(threats);
-    const icons   = { danger: "🔴", warning: "🟡", info: "🔵" };
-    const colors  = { danger: 0xed4245, warning: 0xfaa81a, info: 0x5865f2 };
-    const titles  = { danger: "🚨 IP Grabber Detected", warning: "⚠️ Suspicious Link", info: "ℹ️ Tracked Link" };
-    const footers = {
-        danger:  "Do NOT click these links. They may expose your IP address and location to the sender.",
-        warning: "Be cautious before clicking. These links may hide their destination or track your IP.",
-        info:    "These links were flagged for informational purposes only.",
-    };
-
-    const description = [
-        edited ? "*This is a re-check after the message was edited.*\n" : "",
-        threats.map(t => {
-            const url = t.url.length > 80 ? t.url.slice(0, 77) + "…" : t.url;
-            return `${icons[t.level]} **${t.reason}**\n\`${url}\``;
-        }).join("\n\n"),
-    ].filter(Boolean).join("\n");
-
-    return {
-        type: "rich",
-        color: colors[worst],
-        title: `${titles[worst]} — ${threats.length} flagged link${threats.length > 1 ? "s" : ""}`,
-        description,
-        footer: { text: footers[worst] },
-    };
-}
-
 
 module.exports = class IPGrabberDetector {
     constructor(meta) {
         this.meta = meta;
-        this._onMessage       = this._onMessage.bind(this);
-        this._onMessageUpdate = this._onMessageUpdate.bind(this);
-        this._onMessageDelete = this._onMessageDelete.bind(this);
-        this._onChannelSelect = this._onChannelSelect.bind(this);
-        this._highlighted     = new Set();
         this._mutationObserver = null;
-        this._messageStore = null;
-        this._selectedChannelStore = null;
-        this._debugLastToastAt = 0;
         this._receiveMessageMod = null;
         this._incomingDispatchMod = null;
         this._rescanTimer = null;
-    }
-
-    _debugToast(text, type = "info") {
-        const cfg = this._config();
-        if (!cfg.debugToasts) return;
-        const now = Date.now();
-        if (now - this._debugLastToastAt < 1200) return;
-        this._debugLastToastAt = now;
-        BdApi.UI.showToast(text, { type, timeout: 2500 });
     }
 
 
@@ -207,72 +144,19 @@ module.exports = class IPGrabberDetector {
 
         BdApi.UI.showToast("IPGrabberDetector enabled", { type: "success" });
 
-        console.log("[IPGrabberDetector] start()");
-        this._debugToast("IPGrabberDetector: started", "success");
-
-        const byProps = BdApi.Webpack?.Filters?.byProps;
-        const dispatcherFilter = byProps ? byProps("dispatch", "subscribe") : (m => m?.dispatch && m?.subscribe);
-        this._dispatcher = BdApi.Webpack.getModule(dispatcherFilter, { searchExports: false })
-            ?? BdApi.Webpack.getModule(dispatcherFilter, { searchExports: true });
-        this._messageStore = BdApi.Webpack.getModule(m => m?.getMessages && m?.getMessage, { searchExports: false });
-        this._selectedChannelStore = BdApi.Webpack.getModule(m => m?.getChannelId && typeof m.getChannelId === "function", { searchExports: false });
-        if (this._dispatcher) {
-            this._dispatcher.subscribe("MESSAGE_CREATE", this._onMessage);
-            this._dispatcher.subscribe("MESSAGE_UPDATE", this._onMessageUpdate);
-            this._dispatcher.subscribe("MESSAGE_DELETE", this._onMessageDelete);
-            this._dispatcher.subscribe("CHANNEL_SELECT", this._onChannelSelect);
-            this._dispatcher.subscribe("LOAD_MESSAGES_SUCCESS", this._onChannelSelect);
-
-            if (typeof this._dispatcher.dispatch === "function") {
-                BdApi.Patcher.after(this.meta.name, this._dispatcher, "dispatch", (_this, args) => {
-                    try {
-                        const action = args?.[0];
-                        const type = action?.type;
-                        if (!type) return;
-
-                        if (type === "MESSAGE_CREATE") {
-                            const msg = action?.message ?? action?.messageRecord;
-                            if (msg?.id) this._handle(msg, false);
-                        } else if (type === "MESSAGE_UPDATE") {
-                            if (!this._config().warnOnEdit) return;
-                            const msg = action?.message ?? action?.messageRecord;
-                            if (msg?.id) this._handle(msg, true);
-                        } else if (type === "CHANNEL_SELECT" || type === "LOAD_MESSAGES_SUCCESS") {
-                            this._scanCurrentChannel();
-                            this._scanDomForLinks();
-                        }
-                    } catch {
-                    }
-                });
-            }
-        } else {
-            BdApi.UI.showToast("IPGrabberDetector: could not hook dispatcher", { type: "error" });
-            console.warn("[IPGrabberDetector] Dispatcher hook failed");
-            this._debugToast("IPGrabberDetector: dispatcher hook failed", "error");
-        }
-
-        this._scanCurrentChannel();
-        this._scanDomForLinks();
-
         try {
             this._receiveMessageMod = BdApi.Webpack.getModule(m => typeof m?.receiveMessage === "function", { searchExports: false });
             if (this._receiveMessageMod?.receiveMessage) {
                 BdApi.Patcher.after(this.meta.name, this._receiveMessageMod, "receiveMessage", (_this, args) => {
                     try {
-                        const channelId = args?.[0];
                         const msg = args?.[1];
                         if (!msg?.id) return;
-                        this._debugToast(`IPGrabberDetector: recv ${msg.id}`, "info");
                         this._handle(msg, false);
                     } catch {
                     }
                 });
-                this._debugToast("IPGrabberDetector: receiveMessage hook active", "success");
-            } else {
-                this._debugToast("IPGrabberDetector: receiveMessage hook not found", "error");
             }
         } catch {
-            this._debugToast("IPGrabberDetector: receiveMessage hook failed", "error");
         }
 
         try {
@@ -294,7 +178,6 @@ module.exports = class IPGrabberDetector {
                         const payload = args?.[0];
                         const msg = payload?.message ?? payload?.messageRecord ?? payload;
                         if (!msg?.id) return;
-                        if (!this._config().warnOnEdit) return;
                         this._handle(msg, true);
                     } catch {
                     }
@@ -302,16 +185,11 @@ module.exports = class IPGrabberDetector {
             }
         } catch {
         }
+
+        this._scanDomForLinks();
     }
 
     stop() {
-        if (this._dispatcher) {
-            this._dispatcher.unsubscribe("MESSAGE_CREATE", this._onMessage);
-            this._dispatcher.unsubscribe("MESSAGE_UPDATE", this._onMessageUpdate);
-            this._dispatcher.unsubscribe("MESSAGE_DELETE", this._onMessageDelete);
-            this._dispatcher.unsubscribe("CHANNEL_SELECT", this._onChannelSelect);
-            this._dispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", this._onChannelSelect);
-        }
         if (this._mutationObserver) {
             this._mutationObserver.disconnect();
             this._mutationObserver = null;
@@ -326,9 +204,8 @@ module.exports = class IPGrabberDetector {
         this._removeStyles();
         document.querySelectorAll("[data-ipgrab]").forEach(el => {
             el.removeAttribute("data-ipgrab");
-            el.removeAttribute("data-ipgrab-label");
+            el.removeAttribute("title");
         });
-        this._highlighted.clear();
         BdApi.UI.showToast("IPGrabberDetector disabled", { type: "info" });
     }
 
@@ -354,10 +231,8 @@ module.exports = class IPGrabberDetector {
             }
 
             DOMAIN_MAP = next;
-            console.log(`[IPGrabberDetector] Remote DB loaded: ${added} entries.`);
             BdApi.UI.showToast(`IPGrabberDetector: Remote DB loaded (${added} entries)`, { type: "success", timeout: 4000 });
-
-            this._scanCurrentChannel();
+            this._scanDomForLinks();
         } catch (err) {
             console.warn("[IPGrabberDetector] Could not load remote DB.", err);
             BdApi.UI.showToast(
@@ -381,7 +256,6 @@ module.exports = class IPGrabberDetector {
 
             if (this._rescanTimer) clearTimeout(this._rescanTimer);
             this._rescanTimer = setTimeout(() => {
-                this._scanCurrentChannel();
                 this._scanDomForLinks();
             }, 400);
         });
@@ -404,14 +278,8 @@ module.exports = class IPGrabberDetector {
 
     getSettingsPanel() {
         const defaults = {
-            warnOnDanger:  true,
-            warnOnWarning: true,
-            warnOnInfo:    false,
             ignoreBots:    true,
             highlight:     true,
-            warnOnEdit:    true,
-            debugToasts:   false,
-            debugEmbeds:   false,
         };
         const saved = BdApi.Data.load(this.meta.name, "settings") ?? {};
         const cfg   = { ...defaults, ...saved };
@@ -439,14 +307,8 @@ module.exports = class IPGrabberDetector {
         panel.appendChild(reloadBtn);
 
         const options = [
-            ["warnOnDanger",  "Warn on DANGER links (IP grabbers)"],
-            ["warnOnWarning", "Warn on WARNING links (shorteners, suspicious)"],
-            ["warnOnInfo",    "Warn on INFO links (stat trackers etc.)"],
             ["ignoreBots",    "Ignore messages from bots"],
             ["highlight",     "Highlight flagged messages in chat"],
-            ["warnOnEdit",    "Re-check messages when edited"],
-            ["debugToasts",   "Debug: show toasts (helps diagnose if plugin is running)"],
-            ["debugEmbeds",   "Debug: always send warning embed when threats detected"],
         ];
 
         for (const [key, label] of options) {
@@ -461,7 +323,7 @@ module.exports = class IPGrabberDetector {
             toggle.type    = "checkbox";
             toggle.checked = cfg[key];
             toggle.style.cssText = "width:18px;height:18px;cursor:pointer;accent-color:#5865f2;";
-            toggle.addEventListener("change", () => { cfg[key] = toggle.checked; save(); });
+            toggle.addEventListener("change", () => { cfg[key] = toggle.checked; save(); this._scanDomForLinks(); });
 
             row.appendChild(lbl);
             row.appendChild(toggle);
@@ -474,61 +336,10 @@ module.exports = class IPGrabberDetector {
 
     _config() {
         const defaults = {
-            warnOnDanger:  true,
-            warnOnWarning: true,
-            warnOnInfo:    false,
             ignoreBots:    true,
             highlight:     true,
-            warnOnEdit:    true,
-            debugToasts:   false,
-            debugEmbeds:   false,
         };
         return { ...defaults, ...(BdApi.Data.load(this.meta.name, "settings") ?? {}) };
-    }
-
-
-    _onMessage({ message }) {
-        const msg = message ?? arguments?.[0]?.message ?? arguments?.[0]?.messageRecord ?? arguments?.[0];
-        if (!msg?.id) return;
-        console.log("[IPGrabberDetector] MESSAGE_CREATE", msg.id);
-        this._debugToast(`IPGrabberDetector: message ${msg.id}`, "info");
-        this._handle(msg, false);
-    }
-
-    _onMessageUpdate({ message }) {
-        if (!this._config().warnOnEdit) return;
-        const msg = message ?? arguments?.[0]?.message ?? arguments?.[0]?.messageRecord ?? arguments?.[0];
-        if (!msg?.id) return;
-        console.log("[IPGrabberDetector] MESSAGE_UPDATE", msg.id);
-        this._debugToast(`IPGrabberDetector: update ${msg.id}`, "info");
-        this._handle(msg, true);
-    }
-
-    _onMessageDelete({ message }) {
-        const msg = message ?? arguments?.[0]?.message ?? arguments?.[0]?.messageRecord ?? arguments?.[0];
-        if (msg?.id) {
-            console.log("[IPGrabberDetector] MESSAGE_DELETE", msg.id);
-            this._clearHighlight(msg.id);
-        }
-    }
-
-    _onChannelSelect() {
-        this._scanCurrentChannel();
-        this._scanDomForLinks();
-    }
-
-    _getCurrentChannelId() {
-        try {
-            return this._selectedChannelStore?.getChannelId?.() ?? null;
-        } catch {
-            return null;
-        }
-    }
-
-    _scanCurrentChannel() {
-        const channelId = this._getCurrentChannelId();
-        if (!channelId) return;
-        this._scanChannel(channelId);
     }
 
     _scanDomForLinks() {
@@ -552,7 +363,6 @@ module.exports = class IPGrabberDetector {
             if (threats.length === 0) continue;
 
             const worst = worstLevel(threats);
-            const label = makeShortLabel(threats);
             const tooltip = makeTooltip(threats);
 
             const container =
@@ -563,29 +373,15 @@ module.exports = class IPGrabberDetector {
             if (!container) continue;
 
             container.setAttribute('data-ipgrab', worst);
-            container.setAttribute('data-ipgrab-label', label);
             if (tooltip) container.setAttribute('title', tooltip);
             this._recolorLinks(container);
-        }
-    }
-
-    _scanChannel(channelId) {
-        try {
-            const msgs = this._messageStore?.getMessages?.(channelId);
-            const arr = msgs?.toArray?.() ?? msgs?._array ?? msgs;
-            if (!Array.isArray(arr)) return;
-            for (const message of arr) {
-                this._handle(message, false);
-            }
-        } catch (e) {
-            console.warn("[IPGrabberDetector] Failed to scan channel messages", e);
         }
     }
 
 
     _handle(message, edited) {
         const cfg = this._config();
-        const { id, content, channel_id, author } = message;
+        const { id, content, author } = message;
         if (!content && !message?.embeds?.length) return;
         if (cfg.ignoreBots && author?.bot) return;
 
@@ -608,11 +404,6 @@ module.exports = class IPGrabberDetector {
 
         const threats = urls.map(analyzeUrl).filter(Boolean);
 
-        if (threats.length > 0) {
-            console.log("[IPGrabberDetector] threats", { messageId: id, worst: worstLevel(threats), threats });
-            this._debugToast(`IPGrabberDetector: detected ${worstLevel(threats)} (${threats.length})`, worstLevel(threats) === "danger" ? "error" : "warning");
-        }
-
         if (threats.length === 0) {
             if (edited) this._clearHighlight(id);
             return;
@@ -621,43 +412,8 @@ module.exports = class IPGrabberDetector {
         const worst = worstLevel(threats);
 
         if (cfg.highlight) {
-            const label = makeShortLabel(threats);
             const tooltip = makeTooltip(threats);
-            this._highlightMessage(id, worst, label, tooltip);
-        }
-    }
-
-
-    _sendWarning(channelId, threats, edited) {
-        const embed = buildWarningEmbed(threats, edited);
-        try {
-            const { receiveMessage } = BdApi.Webpack.getModule(m => m?.receiveMessage);
-            receiveMessage(channelId, {
-                id: makeSnowflake(),
-                channel_id: channelId,
-                type: 0,
-                content: "",
-                embeds: [embed],
-                author: {
-                    id: "0",
-                    username: "IPGrabberDetector",
-                    discriminator: "0000",
-                    avatar: null,
-                    bot: true,
-                },
-                timestamp: new Date().toISOString(),
-                mention_everyone: false,
-                mentions: [],
-                mention_roles: [],
-                attachments: [],
-                pinned: false,
-                tts: false,
-            });
-        } catch {
-            BdApi.UI.showNotice(
-                `⚠️ IPGrabberDetector: ${threats.length} suspicious link${threats.length > 1 ? "s" : ""} detected in this channel!`,
-                { type: "danger", timeout: 8000 }
-            );
+            this._highlightMessage(id, worst, tooltip);
         }
     }
 
@@ -678,14 +434,12 @@ module.exports = class IPGrabberDetector {
         );
     }
 
-    _highlightMessage(messageId, level, label, tooltipText) {
-        this._highlighted.add(messageId);
+    _highlightMessage(messageId, level, tooltipText) {
         let attempts = 0;
         const tryIt = () => {
             const el = this._getMessageElement(messageId);
             if (el) {
                 el.setAttribute("data-ipgrab", level);
-                el.setAttribute("data-ipgrab-label", label);
                 if (tooltipText) el.setAttribute("title", tooltipText);
                 this._recolorLinks(el);
             } else if (++attempts < 12) {
@@ -696,11 +450,9 @@ module.exports = class IPGrabberDetector {
     }
 
     _clearHighlight(messageId) {
-        this._highlighted.delete(messageId);
         const el = this._getMessageElement(messageId);
         if (!el) return;
         el.removeAttribute("data-ipgrab");
-        el.removeAttribute("data-ipgrab-label");
         el.removeAttribute("title");
         el.querySelectorAll('a, [role="link"], [class*="anchor"], [class*="link"]').forEach(link => {
             link.style.removeProperty("color");
